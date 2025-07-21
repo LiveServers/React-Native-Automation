@@ -1,5 +1,5 @@
-app_identifier("co.influencer.wowzi") # The bundle identifier of your app
-apple_id("briankyole@wowzi.co") # Your Apple Developer Portal username
+app_identifier("Bundle Identifier") # The bundle identifier of your app
+apple_id("username") # Your Apple Developer Portal username
 
 itc_team_id("Add team Id") # App Store Connect Team ID
 team_id("Developer Team ID") # Developer Portal Team ID
