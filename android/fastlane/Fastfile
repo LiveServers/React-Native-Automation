@@ -1,0 +1,278 @@
+# This file contains the fastlane.tools configuration
+# You can find the documentation at https://docs.fastlane.tools
+#
+# For a list of all available actions, check out
+#
+#     https://docs.fastlane.tools/actions
+#
+# For a list of all available plugins, check out
+#
+#     https://docs.fastlane.tools/plugins/available-plugins
+#
+
+# Uncomment the line if you want fastlane to automatically update itself
+# update_fastlane
+
+
+default_platform(:android)
+fastlane_require 'dotenv'
+# Dotenv.load("/Users/kyole/Desktop/wowzi-rn-upgrade/wowzi/.env.dev") #remove this after payment is secured
+Dotenv.load("/home/runner/work/wowzi-upgrade/wowzi-upgrade/.env.dev") #don't change this, it loads secrets from workflows to fastlane
+Dotenv.load("/home/runner/work/wowzi-upgrade/wowzi-upgrade/.env.prod") #don't change this, it loads secrets from workflows to fastlane
+
+def load_gradle_properties(file_path)
+  properties = {}
+  File.open(file_path, 'r') do |file|
+    file.each_line do |line|
+      next if line.start_with?('#') || line.strip.empty?
+      key, value = line.strip.split('=', 2)
+      properties[key] = value
+    end
+  end
+  properties
+end
+
+#get latest commit and determine the bump type
+#use commit convention of <fix: "message">, <feat: "message">, <BREAKING CHANGE: "message">
+def get_bump_type_from_commit_message
+  # Extract the commit message
+  last_commit_message = sh("git log -1 --pretty=%B").strip
+
+  # Determine the bump type based on commit message
+  if last_commit_message.include?("BREAKING CHANGE")
+    return "major"
+  elsif last_commit_message.include?("fix:newVersion")
+    return "fix:newVersion"
+  elsif last_commit_message.include?("feat:newVersion")
+    return "feat:newVersion"
+  elsif last_commit_message.include?("feat")
+    return "minor"
+  elsif last_commit_message.include?("fix")
+    return "patch"
+  end
+end
+
+# for android I did not find a in built way to bump up the semantic versioning
+def set_version_name(new_version_name)
+  gradle_file = '../app/build.gradle'
+  text = File.read(gradle_file)
+  new_contents = text.gsub(/versionName "(.*)"/, "versionName \"#{new_version_name}\"")
+  File.open(gradle_file, 'w') { |file| file.puts new_contents }
+end
+
+def bump_version_name(bump_type)
+  current_version_name = get_version_name(
+    ext_constant_name:'versionName'
+  )
+  version_parts = current_version_name.split('.').map(&:to_i)
+
+  case bump_type
+  when 'patch'
+    version_parts[2] += 1
+  when 'minor'
+    version_parts[1] += 1
+    version_parts[2] = 0
+  when 'major'
+    version_parts[0] += 1
+    version_parts[1] = 0
+    version_parts[2] = 0
+  end
+
+  new_version_name = version_parts.join('.')
+  set_version_name(new_version_name)
+end
+
+def create_pr
+  new_branch = "version-bump-#{Time.now.strftime('%Y%m%d%H%M%S')}"
+  sh "git checkout -b #{new_branch}"
+
+  sh "git add ../app/build.gradle" #this should be the only thing changed
+  sh "git commit -m 'Version bump' --no-verify"
+
+  # Step 3: Push to the GitHub repository
+  push_to_git_remote(
+    remote: 'origin',
+    remote_branch: new_branch
+  )
+end
+
+def release_to_firebase(firebase_app, firebase_cli_token)
+  # https://github.com/firebase/fastlane-plugin-firebase_app_distribution/issues/251
+  # Upload to Firebase App Distribution - you also have to link to google to release aab's https://firebase.google.com/docs/app-distribution/android/distribute-console?apptype=aab#before_you_begin
+  firebase_app_distribution(#need firebase cli installed
+    app: firebase_app,  # Replace with your Firebase App ID
+    groups: "wowzi-internal",  # Firebase tester groups
+    release_notes: sh("git log -1 --pretty=%B").strip,  # Optional release notes
+    android_artifact_type: "AAB",
+    firebase_cli_token:firebase_cli_token #firebase login:ci to generate a long lived token
+  )
+end
+
+before_all do
+  Dotenv.overload '.env.dev'
+  puts Dotenv.overload
+end
+
+platform :android do
+  #this releases a develop aab for testing -> there will be no version bumps for this lane
+  desc "Build and upload to Firebase App Distribution"
+  # ensure_git_branch(branch: 'develop')
+  # ensure_git_status_clean
+  # git_pull
+  lane :firebase_distribution_develop do
+    ENV["ENVFILE"] = "/home/runner/work/wowzi-upgrade/wowzi-upgrade/.env.dev"
+    #ENV["ENVFILE"] = "/Users/kyole/Desktop/wowzi-rn-upgrade/wowzi/.env.dev"  #remove this after payment is secured
+    UI.message("FASTLANE_USER 1: #{ENV['FIREBASE_APP']} ")
+    UI.message("FASTLANE_USER 2: #{ENV['FIREBASE_CLI_TOKEN']} ")
+    firebase_app = ENV['FIREBASE_APP']
+    firebase_cli_token = ENV['FIREBASE_CLI_TOKEN']
+    gradle_properties = load_gradle_properties('../gradle.properties')
+    store_password = gradle_properties['RELEASE_STORE_PASSWORD']
+    key_password = gradle_properties['RELEASE_KEY_PASSWORD']
+    key_alias = gradle_properties['RELEASE_KEY_ALIAS']
+    project_root = File.expand_path("..", Dir.pwd)
+    releaseFilePath = File.join(project_root, "app", "wowzi-prod.keystore")
+    gradle(task: 'clean')
+
+    bump_type = get_bump_type_from_commit_message()
+    if bump_type
+      #Increment the version code automatically
+      increment_version_code(
+        gradle_file_path: "./app/build.gradle"
+      )
+      if bump_type == "feat:newVersion"
+        bump_version_name('minor')
+      elsif bump_type == "fix:newVersion"
+        bump_version_name('patch')
+      else
+        UI.message("No feature bump. Current bump type:: #{bump_type}")
+      end
+      UI.message("Version number incremented with bump type: #{bump_type}")
+    else
+      UI.message("No bump type specified, skipping version number increment.")
+    end
+
+    gradle(
+      task: 'bundle',
+      build_type: 'Release',
+      print_command: false,
+      properties: {
+        "android.injected.signing.store.file" => releaseFilePath,
+        "android.injected.signing.store.password" => store_password,
+        "android.injected.signing.key.alias" => key_alias,
+        "android.injected.signing.key.password" => key_password,
+        "env" => ".env.dev"
+      }
+    )
+
+    if bump_type
+      release_to_firebase(firebase_app, firebase_cli_token)
+      create_pr()
+    end
+  end
+
+  #this releases a production aab for testing -> there will be no version bumps for this lane
+  desc "Build and upload to Firebase App Distribution"
+  lane :firebase_distribution_staging do
+    ENV["ENVFILE"] = "/home/runner/work/wowzi-upgrade/wowzi-upgrade/.env.prod"
+    firebase_app = ENV['FIREBASE_APP']
+    firebase_cli_token = ENV['FIREBASE_CLI_TOKEN']
+    gradle_properties = load_gradle_properties('../gradle.properties')
+    store_password = gradle_properties['RELEASE_STORE_PASSWORD']
+    key_password = gradle_properties['RELEASE_KEY_PASSWORD']
+    key_alias = gradle_properties['RELEASE_KEY_ALIAS']
+    project_root = File.expand_path("..", Dir.pwd)
+    releaseFilePath = File.join(project_root, "app", "wowzi-prod.keystore")
+    gradle(task: 'clean')
+
+    bump_type = get_bump_type_from_commit_message()
+    if bump_type
+      #Increment the version code automatically
+      increment_version_code(
+        gradle_file_path: "./app/build.gradle"
+      )
+      if bump_type == "feat:newVersion"
+        bump_version_name('minor')
+      elsif bump_type == "fix:newVersion"
+        bump_version_name('patch')
+      else
+        UI.message("No feature bump. Current bump type:: #{bump_type}")
+      end
+      UI.message("Version number incremented with bump type: #{bump_type}")
+    else
+      UI.message("No bump type specified, skipping version number increment.")
+    end
+
+    gradle(
+      task: 'bundle',
+      build_type: 'Release',
+      print_command: false,
+      properties: {
+        "android.injected.signing.store.file" => releaseFilePath,
+        "android.injected.signing.store.password" => store_password,
+        "android.injected.signing.key.alias" => key_alias,
+        "android.injected.signing.key.password" => key_password,
+        "env" => ".env.prod"
+      }
+    )
+
+    if bump_type
+      release_to_firebase(firebase_app, firebase_cli_token)
+      create_pr()
+    end
+  end
+
+  desc "Build and upload to Firebase App Distribution"
+  lane :firebase_distribution_production do
+    ENV["ENVFILE"] = "/home/runner/work/wowzi-upgrade/wowzi-upgrade/.env.prod"
+    gradle_properties = load_gradle_properties('../gradle.properties')
+    store_password = gradle_properties['RELEASE_STORE_PASSWORD']
+    key_password = gradle_properties['RELEASE_KEY_PASSWORD']
+    key_alias = gradle_properties['RELEASE_KEY_ALIAS']
+    project_root = File.expand_path("..", Dir.pwd)
+    releaseFilePath = File.join(project_root, "app", "wowzi-prod.keystore")
+    gradle(task: 'clean')
+
+    bump_type = get_bump_type_from_commit_message()
+    if bump_type
+      #Increment the version code automatically
+      increment_version_code(
+        gradle_file_path: "./app/build.gradle"
+      )
+      if bump_type == "feat:newVersion"
+        bump_version_name('minor')
+      elsif bump_type == "fix:newVersion"
+        bump_version_name('patch')
+      else
+        UI.message("No feature bump. Current bump type:: #{bump_type}")
+      end
+      UI.message("Version number incremented with bump type: #{bump_type}")
+    else
+      UI.message("No bump type specified, skipping version number increment.")
+    end
+
+    gradle(
+      task: 'bundle',
+      build_type: 'Release',
+      print_command: false,
+      properties: {
+        "android.injected.signing.store.file" => releaseFilePath,
+        "android.injected.signing.store.password" => store_password,
+        "android.injected.signing.key.alias" => key_alias,
+        "android.injected.signing.key.password" => key_password,
+        "env" => ".env.prod"
+      }
+    )
+    # we'll use firebase for now
+    # upload_to_play_store(
+    #   track: 'internal',
+    #   json_key: "/home/runner/work/wowzi-upgrade/wowzi-upgrade/android/wowzi-app-threewin-b5f20b4ef89a.json",
+    #   skip_upload_apk: true
+    # )
+    
+    if bump_type
+      release_to_firebase(firebase_app, firebase_cli_token)
+      create_pr()
+    end
+  end
+end

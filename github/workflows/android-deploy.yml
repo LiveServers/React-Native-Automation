@@ -1,0 +1,137 @@
+name: Android Build and Deploy
+
+on:
+  push:
+    branches:
+      - develop
+      - staging
+      - master
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Set up JDK
+      uses: actions/setup-java@v1
+      with:
+        java-version: '17.0.2'
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v2
+      with:
+        node-version: '18.18.0'
+
+    - name: Cache Gradle
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.gradle/caches
+          ~/.gradle/wrapper
+        key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+        restore-keys: |
+          ${{ runner.os }}-gradle-
+
+    - name: Set up Gradle properties
+      run: |
+        echo "RELEASE_STORE_PASSWORD=${{ secrets.RELEASE_STORE_PASSWORD }}" >> $GITHUB_WORKSPACE/android/gradle.properties
+        echo "RELEASE_KEY_PASSWORD=${{ secrets.RELEASE_KEY_PASSWORD }}" >> $GITHUB_WORKSPACE/android/gradle.properties
+        echo "RELEASE_KEY_ALIAS=${{ secrets.RELEASE_KEY_ALIAS }}" >> $GITHUB_WORKSPACE/android/gradle.properties
+
+    - name: Install dependencies
+      run: npm install -f
+
+    - name: Set up Ruby
+      uses: ruby/setup-ruby@v1
+      with:
+        ruby-version: '3.1.2'  # Specify the version of Ruby you want to use
+        bundler-cache: true  # Caches the gems installed by Bundler
+
+    - name: Decode and Save Keystore
+      run: |
+        echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > $GITHUB_WORKSPACE/android/app/wowzi-prod.keystore
+
+    - name: Load environment variables for develop branch
+      if: github.ref == 'refs/heads/develop'
+      run: |
+        echo "Current working directory: $PWD"
+        echo "Creating .env.dev file in $GITHUB_WORKSPACE"
+
+        touch $GITHUB_WORKSPACE/.env.dev
+
+        # Double-check if the file was created
+        if [ ! -f "$GITHUB_WORKSPACE/.env.dev" ]; then
+          echo ".env.dev file was not created!"
+          exit 1
+        fi
+
+        for secret in $(printenv | grep '^ENV_DEV_'); do
+          key=$(echo $secret | cut -d'=' -f1 | sed 's/^ENV_DEV_//')
+          value=$(echo $secret | cut -d'=' -f2-)
+          echo "$key=$value" >> $GITHUB_WORKSPACE/.env.dev
+        done
+
+    - name: Load environment variables for staging and master branches
+      if: github.ref == 'refs/heads/staging' || github.ref == 'refs/heads/master'
+      run: |
+        echo "Current working directory: $PWD"
+        echo "Creating .env.prod file in $GITHUB_WORKSPACE"
+
+        touch $GITHUB_WORKSPACE/.env.prod
+
+        # Double-check if the file was created
+        if [ ! -f "$GITHUB_WORKSPACE/.env.prod" ]; then
+          echo ".env.prod file was not created!"
+          exit 1
+        fi
+
+        for secret in $(printenv | grep '^ENV_PROD_'); do
+          key=$(echo $secret | cut -d'=' -f1 | sed 's/^ENV_PROD_//')
+          value=$(echo $secret | cut -d'=' -f2-)
+          echo "$key=$value" >> $GITHUB_WORKSPACE/.env.prod
+        done
+
+    - name: List contents of GITHUB_WORKSPACE
+      run: |
+        echo "Listing contents of $GITHUB_WORKSPACE"
+        ls -a $GITHUB_WORKSPACE
+
+    - name: Debug .env.dev
+      if: github.ref == 'refs/heads/develop'
+      run: cat $GITHUB_WORKSPACE/.env.dev
+
+    - name: Debug .env.prod
+      if: github.ref == 'refs/heads/staging' || github.ref == 'refs/heads/master'
+      run: cat $GITHUB_WORKSPACE/.env.prod
+
+    - name: Install Bundler And Fastlane Plugins
+      run: |
+        cd android
+        gem install bundler
+        bundle install
+
+    - name: Setup Identity
+      run: |
+        git config --global user.email 'briankyole@wowzi.co'
+        git config --global user.name 'Brian Kyole'
+
+    - name: Run Fastlane (Develop Build)
+      if: github.ref == 'refs/heads/develop'
+      run: |
+        cd android
+        bundle exec fastlane firebase_distribution_develop
+
+    - name: Run Fastlane (Staging Build)
+      if: github.ref == 'refs/heads/staging'
+      run: |
+        cd android
+        bundle exec fastlane firebase_distribution_staging
+
+    - name: Run Fastlane (Beta Build to Play Store)
+      if: github.ref == 'refs/heads/master'
+      run: |
+        cd android
+        bundle exec fastlane firebase_distribution_production

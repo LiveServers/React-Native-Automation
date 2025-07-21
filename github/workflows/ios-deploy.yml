@@ -1,0 +1,192 @@
+name: iOS Build and TestFlight
+
+on:
+  push:
+    branches:
+      - staging
+      - production
+      - develop
+
+jobs:
+  build:
+    name: Build iOS App
+    runs-on: macos-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v2
+      with:
+        node-version: '18.18.0'
+
+    - name: Install dependencies
+      run: npm install -f
+
+    - name: Set up Ruby
+      uses: ruby/setup-ruby@v1
+      with:
+        ruby-version: '3.1.2'  # Specify the version of Ruby you want to use
+        bundler-cache: true  # Caches the gems installed by Bundler
+
+    # - name: Set up environment variables
+    #   run: |
+    #     echo "FASTLANE_USER=${{ secrets.FASTLANE_USER }}" >> $GITHUB_ENV
+    #     echo "FASTLANE_APPLE_APPLICATION_SPECIFIC_PASSWORD=${{ secrets.FASTLANE_APPLE_APPLICATION_SPECIFIC_PASSWORD }}" >> $GITHUB_ENV
+    #     echo "MATCH_PASSWORD=${{ secrets.MATCH_PASSWORD }}" >> $GITHUB_ENV
+    #     echo "GH_ACCESS_TOKEN=${{ secrets.GH_ACCESS_TOKEN }}" >> $GITHUB_ENV
+    #     echo "GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}" >> $GITHUB_ENV
+
+    - name: Install dependencies
+      run: npm install -f
+
+    - name: Set up Ruby
+      uses: ruby/setup-ruby@v1
+      with:
+        ruby-version: '3.1.2'  # Specify the version of Ruby you want to use
+        bundler-cache: true  # Caches the gems installed by Bundler
+
+    - name: Add SSH Key
+      run: |
+        mkdir -p ~/.ssh
+        echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa_ios_fastlane
+        chmod 600 ~/.ssh/id_rsa_ios_fastlane
+        ssh-add ~/.ssh/id_rsa_ios_fastlane
+        ssh-keyscan github.com >> ~/.ssh/known_hosts
+
+    - name: Set up AuthKey
+      run: |
+        # mkdir -p ios
+        echo "${{ secrets.P8_FILE }}" | base64 --decode > $GITHUB_WORKSPACE/AuthKey_X9B95H2VQ5.p8
+        chmod 600 $GITHUB_WORKSPACE/AuthKey_X9B95H2VQ5.p8
+
+    - name: Verify File
+      run: ls -l $GITHUB_WORKSPACE/AuthKey_X9B95H2VQ5.p8
+
+    - name: Load environment variables for develop branch
+      if: github.ref == 'refs/heads/develop'
+      run: |
+        echo "Current working directory: $PWD"
+        echo "Creating .env.dev file in $GITHUB_WORKSPACE"
+
+        touch $GITHUB_WORKSPACE/.env.dev
+
+        # Double-check if the file was created
+        if [ ! -f "$GITHUB_WORKSPACE/.env.dev" ]; then
+          echo ".env.dev file was not created!"
+          exit 1
+        fi
+
+        for secret in $(printenv | grep '^ENV_DEV_'); do
+          key=$(echo $secret | cut -d'=' -f1 | sed 's/^ENV_DEV_//')
+          value=$(echo $secret | cut -d'=' -f2-)
+          echo "$key=$value" >> $GITHUB_WORKSPACE/.env.dev
+        done
+
+    - name: Load environment variables for staging and master branches
+      if: github.ref == 'refs/heads/staging' || github.ref == 'refs/heads/master'
+      run: |
+        echo "Current working directory: $PWD"
+        echo "Creating .env.prod file in $GITHUB_WORKSPACE"
+
+        touch $GITHUB_WORKSPACE/.env.prod
+
+        # Double-check if the file was created
+        if [ ! -f "$GITHUB_WORKSPACE/.env.prod" ]; then
+          echo ".env.prod file was not created!"
+          exit 1
+        fi
+
+        for secret in $(printenv | grep '^ENV_PROD_'); do
+          key=$(echo $secret | cut -d'=' -f1 | sed 's/^ENV_PROD_//')
+          value=$(echo $secret | cut -d'=' -f2-)
+          echo "$key=$value" >> $GITHUB_WORKSPACE/.env.prod
+        done
+
+    - name: List contents of GITHUB_WORKSPACE
+      run: |
+        echo "Listing contents of $GITHUB_WORKSPACE"
+        ls -a $GITHUB_WORKSPACE
+
+    - name: Debug .env.dev
+      if: github.ref == 'refs/heads/develop'
+      run: cat $GITHUB_WORKSPACE/.env.dev
+
+    - name: Debug .env.prod
+      if: github.ref == 'refs/heads/staging'
+      run: cat $GITHUB_WORKSPACE/.env.prod
+
+    - name: Install CocoaPods Bundler And Fastlane Plugins
+      run: |
+        cd ios
+        pod install
+        gem install bundler
+        bundle install
+
+
+    - name: Set up match credentials
+      run: |
+        if [[ $GITHUB_REF == "refs/heads/develop" ]]; then
+          env_file=".env.dev"
+        elif [[ $GITHUB_REF == "refs/heads/staging" || $GITHUB_REF == "refs/heads/master" ]]; then
+          env_file=".env.prod"
+        else
+          echo "Unknown branch. Exiting."
+          exit 1
+        fi
+
+        echo "MATCH_PASSWORD=${{ secrets.MATCH_PASSWORD }}" > $GITHUB_WORKSPACE/$env_file
+        echo "FASTLANE_USER=${{ secrets.FASTLANE_USER }}" >> $GITHUB_WORKSPACE/$env_file
+        echo "FASTLANE_APPLE_APPLICATION_SPECIFIC_PASSWORD=${{ secrets.FASTLANE_APPLE_APPLICATION_SPECIFIC_PASSWORD }}" >> $GITHUB_WORKSPACE/$env_file
+
+    - name: Set up SSH for GitHub
+      run: |
+        mkdir -p ~/.ssh
+        echo "${{ secrets.SSH_PRIVATE_KEY }}" > $HOME/.ssh/id_rsa
+        chmod 600 ~/.ssh/id_rsa
+        ssh-keyscan github.com >> $HOME/.ssh/known_hosts
+      shell: bash
+
+    - name: Cache match repository
+      uses: actions/cache@v4
+      with:
+        path: ~/.fastlane/spaceship
+        key: ${{ runner.os }}-match-${{ hashFiles('Matchfile') }}
+
+    - name: Setup Identity
+      run: |
+        git config --global user.email 'briankyole@wowzi.co'
+        git config --global user.name 'Brian Kyole'
+
+    - name: Build and upload to TestFlight (Develop)
+      if: github.ref == 'refs/heads/develop'
+      run: |
+        cd ios
+        bundle exec fastlane develop_release
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # GitHub token for HTTPS authentication
+        SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        GITHUB_USERNAME: ${{ secrets.GITHUB_USERNAME }}
+        MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+        FASTLANE_USER: ${{ secrets.FASTLANE_USER }}
+        FASTLANE_APPLE_APPLICATION_SPECIFIC_PASSWORD: ${{ secrets.FASTLANE_APPLE_APPLICATION_SPECIFIC_PASSWORD }}
+        MATCH_GIT_BASIC_AUTHORIZATION: ${{secrets.MATCH_GIT_BASIC_AUTHORIZATION}}
+        FASTLANE_PASSWORD: ${{secrets.FASTLANE_PASSWORD}}
+        CI: ${{secrets.CI}}
+
+    - name: Build and upload to TestFlight (Staging)
+      if: github.ref == 'refs/heads/staging'
+      run: |
+        cd ios
+        bundle exec fastlane staging_release
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # GitHub token for HTTPS authentication
+        SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        GITHUB_USERNAME: ${{ secrets.GITHUB_USERNAME }}
+
+    - name: Build and upload to TestFlight (Production)
+      if: github.ref == 'refs/heads/production'
+      run: |
+        cd ios
+        bundle exec fastlane production_release

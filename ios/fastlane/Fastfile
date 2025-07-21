@@ -1,0 +1,171 @@
+# For iOS signing, remember certificates expire.
+# Get the certificate.p12 from keystone
+# Get the Wowzi.mobileprovision from profile on apple dev
+
+# Convert them into base64 using 
+# base64 -i certificate.p12 -o certificate_base64.txt 
+# base64 -i profile.mobileprovision -o profile_base64.txt
+
+
+# Uncomment the line if you want fastlane to automatically update itself
+# update_fastlane
+default_platform(:ios)
+fastlane_require 'dotenv'
+#Dotenv.load('/Users/kyole/Desktop/wowzi-rn-upgrade/wowzi/.env.dev')
+Dotenv.load("/home/runner/work/wowzi-upgrade/wowzi-upgrade/.env.dev") #don't change this, it loads secrets from workflows to fastlane
+Dotenv.load("/home/runner/work/wowzi-upgrade/wowzi-upgrade/.env.prod") #don't change this, it loads secrets from workflows to fastlane
+
+xcversion(version: "15.1")
+
+def get_bump_type_from_commit_message
+  # Extract the commit message
+  last_commit_message = sh("git log -1 --pretty=%B").strip
+
+  # Determine the bump type based on commit message
+  if last_commit_message.include?("BREAKING CHANGE")
+    return "major"
+  elsif last_commit_message.include?("fix:newVersion")
+    return "fix:newVersion"
+  elsif last_commit_message.include?("feat:newVersion")
+    return "feat:newVersion"
+  elsif last_commit_message.include?("feat")
+    return "minor"
+  elsif last_commit_message.include?("fix")
+    return "patch"
+  end
+end
+
+def create_pr
+  new_branch = "version-bump-#{Time.now.strftime('%Y%m%d%H%M%S')}"
+  sh "git checkout -b #{new_branch}"
+
+  sh "git add ." #this should be the only thing changed
+  sh "git commit -m 'Version bump' --no-verify"
+
+  # Step 3: Push to the GitHub repository
+  push_to_git_remote(
+    remote: 'origin',
+    remote_branch: new_branch
+  )
+end
+
+platform :ios do
+  desc "Push a new develop build to TestFlight"
+  lane :develop_release do
+    setup_ci if ENV['CI']
+    ENV["ENVFILE"] = "/home/runner/work/wowzi-upgrade/wowzi-upgrade/.env.dev"
+    git_token = ENV["MATCH_GIT_BASIC_AUTHORIZATION"]
+    UI.message("FASTLANE_USER 1: #{ENV['FASTLANE_APPLE_APPLICATION_SPECIFIC_PASSWORD']} ")
+    UI.message("FASTLANE_USER 2: #{ENV['FASTLANE_PASSWORD']} ")
+    UI.message("FASTLANE_USER 3:  #{ENV["MATCH_GIT_BASIC_AUTHORIZATION"]}")
+    update_code_signing_settings(profile_name:'match AppStore co.influencer.wowzi', team_id:'63TA8B68U6', code_sign_identity: "Apple Distribution: Wowzi Inc (63TA8B68U6)")
+    match(type: "appstore", app_identifier: 'co.influencer.wowzi', shallow_clone: true, git_private_key: git_token, readonly: true)
+    bump_type = get_bump_type_from_commit_message()
+    if bump_type
+      increment_build_number(xcodeproj: "wowzi.xcodeproj")
+      if bump_type == "feat:newVersion"
+        increment_version_number(bump_type: 'minor')
+      elsif bump_type == "fix:newVersion"
+        increment_version_number(bump_type: 'patch')
+      else
+        UI.message("No feature bump. Current bump type:: #{bump_type}")
+      end
+      UI.message("Version number incremented with bump type: #{bump_type}")
+    else
+      UI.message("No bump type specified, skipping version number increment.")
+    end
+    build_app(workspace: "wowzi.xcworkspace", scheme: "wowzi")
+    if bump_type
+      # upload_to_testflight
+      api_key = app_store_connect_api_key(
+        key_id: "X9B95H2VQ5",
+        issuer_id: "26bdde02-9c59-4607-8b43-0fda76dd6ee0",
+        key_filepath: "/Users/runner/work/wowzi-upgrade/wowzi-upgrade/AuthKey_X9B95H2VQ5.p8",
+        duration: 1200, # optional (maximum 1200)
+        in_house: false # optional but may be required if using match/sigh
+      )
+    
+      # Automatically loads Actions.lane_context[SharedValues::APP_STORE_CONNECT_API_KEY]
+      pilot(api_key:api_key, distribute_external: false, skip_waiting_for_build_processing: true, skip_submission: true)
+      create_pr()
+    end
+  end
+
+  desc "Push a new staging build to TestFlight"
+  lane :staging_release do
+    ENV["ENVFILE"] = "/home/runner/work/wowzi-upgrade/wowzi-upgrade/.env.prod"
+    git_token = ENV["MATCH_GIT_BASIC_AUTHORIZATION"]
+    UI.message("FASTLANE_USER 1: #{ENV['GITHUB_USERNAME']} ")
+    UI.message("FASTLANE_USER 2: #{ENV['SSH_PRIVATE_KEY']} ")
+    UI.message("FASTLANE_USER 3:  #{ENV["MATCH_GIT_BASIC_AUTHORIZATION"]}")
+    # this is going to disable automatic code signing by build_app
+    update_code_signing_settings(profile_name:'match AppStore co.influencer.wowzi', team_id:'63TA8B68U6', code_sign_identity: "Apple Distribution: Wowzi Inc (63TA8B68U6)")
+    match(type: "appstore", app_identifier: 'co.influencer.wowzi', shallow_clone: true, git_private_key: git_token, readonly: true)
+    bump_type = get_bump_type_from_commit_message()
+    if bump_type
+      increment_build_number(xcodeproj: "wowzi.xcodeproj")
+      if bump_type == "feat:newVersion"
+        increment_version_number(bump_type: 'minor')
+      elsif bump_type == "fix:newVersion"
+        increment_version_number(bump_type: 'patch')
+      else
+        UI.message("No feature bump. Current bump type:: #{bump_type}")
+      end
+      UI.message("Version number incremented with bump type: #{bump_type}")
+    else
+      UI.message("No bump type specified, skipping version number increment.")
+    end
+    build_app(workspace: "wowzi.xcworkspace", scheme: "wowzi")
+    if bump_type
+      # upload_to_testflight
+      api_key = app_store_connect_api_key(
+        key_id: "X9B95H2VQ5",
+        issuer_id: "26bdde02-9c59-4607-8b43-0fda76dd6ee0",
+        key_filepath: "/Users/runner/work/wowzi-upgrade/wowzi-upgrade/AuthKey_X9B95H2VQ5.p8",
+        duration: 1200, # optional (maximum 1200)
+        in_house: false # optional but may be required if using match/sigh
+      )
+    
+      # Automatically loads Actions.lane_context[SharedValues::APP_STORE_CONNECT_API_KEY]
+      pilot(api_key:api_key, distribute_external: false, skip_waiting_for_build_processing: true, skip_submission: true)
+      create_pr()
+    end
+  end
+
+  desc "Push a new production build to TestFlight"
+  lane :production_release do
+    ENV["ENVFILE"] = "/home/runner/work/wowzi-upgrade/wowzi-upgrade/.env.prod"
+    git_token = ENV["MATCH_GIT_BASIC_AUTHORIZATION"]
+    update_code_signing_settings(profile_name:'match AppStore co.influencer.wowzi', team_id:'63TA8B68U6', code_sign_identity: "Apple Distribution: Wowzi Inc (63TA8B68U6)")
+    match(type: "appstore", app_identifier: 'co.influencer.wowzi',git_private_key:git_token, clone_branch_directly: true, shallow_clone: true)
+    bump_type = get_bump_type_from_commit_message()
+    if bump_type
+      increment_build_number(xcodeproj: "wowzi.xcodeproj")
+      if bump_type == "feat:newVersion"
+        increment_version_number(bump_type: 'minor')
+      elsif bump_type == "fix:newVersion"
+        increment_version_number(bump_type: 'patch')
+      else
+        UI.message("No feature bump. Current bump type:: #{bump_type}")
+      end
+      UI.message("Version number incremented with bump type: #{bump_type}")
+    else
+      UI.message("No bump type specified, skipping version number increment.")
+    end
+    build_app(workspace: "wowzi.xcworkspace", scheme: "wowzi")
+    if bump_type
+      # upload_to_testflight
+      api_key = app_store_connect_api_key(
+        key_id: "X9B95H2VQ5",
+        issuer_id: "26bdde02-9c59-4607-8b43-0fda76dd6ee0",
+        key_filepath: "/Users/runner/work/wowzi-upgrade/wowzi-upgrade/AuthKey_X9B95H2VQ5.p8",
+        duration: 1200, # optional (maximum 1200)
+        in_house: false # optional but may be required if using match/sigh
+      )
+    
+      # Automatically loads Actions.lane_context[SharedValues::APP_STORE_CONNECT_API_KEY]
+      pilot(api_key:api_key, distribute_external: false, skip_waiting_for_build_processing: true, skip_submission: true)
+      create_pr()
+    end
+  end
+end
